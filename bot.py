@@ -13,6 +13,12 @@ from threading import Thread
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
+CMC_API_KEY = os.getenv("CMC_API_KEY", "")
+USE_CMC_FILTER = os.getenv("USE_CMC_FILTER", "true").lower() == "true"
+CMC_TOP_N = int(os.getenv("CMC_TOP_N", "1000"))
+MIN_MARKET_CAP = float(os.getenv("MIN_MARKET_CAP", "0"))
+MAX_MARKET_CAP = float(os.getenv("MAX_MARKET_CAP", "1000000000"))
+
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "900"))
 TIMEFRAME = os.getenv("TIMEFRAME", "15m")
 MAX_COINS = int(os.getenv("MAX_COINS", "300"))
@@ -44,7 +50,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Early Reversal Bot is running ✅"
+    return "Early Reversal Bot with CMC Filter is running ✅"
 
 # =========================
 # FILTERS
@@ -64,6 +70,8 @@ EXCLUDED_KEYWORDS = [
 ]
 
 sent_signals = {}
+cmc_allowed_symbols = {}
+last_cmc_update = 0
 
 # =========================
 # TELEGRAM
@@ -95,11 +103,18 @@ def safe_float(x, default=0):
     except Exception:
         return default
 
+def base_symbol(symbol):
+    s = symbol.upper()
+    s = s.replace("_USDT", "")
+    s = s.replace("-USDT", "")
+    s = s.replace("USDT", "")
+    return s
+
 def normalize_symbol(symbol):
     return symbol.replace("_", "/").replace("-", "/")
 
 def is_excluded(symbol):
-    s = symbol.upper().replace("_USDT", "").replace("-USDT", "").replace("USDT", "")
+    s = base_symbol(symbol)
     return any(x in s for x in EXCLUDED_KEYWORDS)
 
 def cooldown_ok(key):
@@ -156,6 +171,109 @@ def convert_timeframe(exchange):
     return mapping.get(exchange, tf)
 
 # =========================
+# CMC FILTER
+# =========================
+def update_cmc_filter():
+    global cmc_allowed_symbols, last_cmc_update
+
+    if not USE_CMC_FILTER:
+        cmc_allowed_symbols = {}
+        return
+
+    if not CMC_API_KEY:
+        print("CMC_API_KEY missing. CMC filter disabled temporarily.")
+        cmc_allowed_symbols = {}
+        return
+
+    now = time.time()
+
+    # تحديث CMC كل ساعة فقط حتى لا يستهلك الطلبات
+    if now - last_cmc_update < 3600 and cmc_allowed_symbols:
+        return
+
+    print("Updating CoinMarketCap filter...")
+
+    url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
+    headers = {
+        "X-CMC_PRO_API_KEY": CMC_API_KEY
+    }
+    params = {
+        "start": "1",
+        "limit": str(CMC_TOP_N),
+        "convert": "USD",
+        "sort": "market_cap",
+        "sort_dir": "desc"
+    }
+
+    try:
+        data = requests.get(url, headers=headers, params=params, timeout=30).json()
+
+        if "data" not in data:
+            print("CMC error:", data)
+            return
+
+        allowed = {}
+
+        for coin in data["data"]:
+            symbol = str(coin.get("symbol", "")).upper()
+            name = str(coin.get("name", "")).upper()
+            quote = coin.get("quote", {}).get("USD", {})
+
+            market_cap = safe_float(quote.get("market_cap"))
+            volume_24h = safe_float(quote.get("volume_24h"))
+            change_24h = safe_float(quote.get("percent_change_24h"))
+
+            if not symbol:
+                continue
+
+            if market_cap < MIN_MARKET_CAP:
+                continue
+
+            if market_cap > MAX_MARKET_CAP:
+                continue
+
+            if volume_24h < MIN_VOLUME_USDT:
+                continue
+
+            if abs(change_24h) > MAX_24H_CHANGE:
+                continue
+
+            combined = symbol + " " + name
+            if any(x in combined for x in EXCLUDED_KEYWORDS):
+                continue
+
+            allowed[symbol] = {
+                "name": coin.get("name", symbol),
+                "market_cap": market_cap,
+                "volume_24h": volume_24h,
+                "change_24h": change_24h,
+                "rank": coin.get("cmc_rank")
+            }
+
+        cmc_allowed_symbols = allowed
+        last_cmc_update = now
+
+        print(f"CMC allowed symbols: {len(cmc_allowed_symbols)}")
+
+    except Exception as e:
+        print("CMC update error:", e)
+
+def cmc_is_allowed(symbol):
+    if not USE_CMC_FILTER:
+        return True
+
+    if not CMC_API_KEY:
+        return True
+
+    if not cmc_allowed_symbols:
+        return True
+
+    return base_symbol(symbol) in cmc_allowed_symbols
+
+def get_cmc_info(symbol):
+    return cmc_allowed_symbols.get(base_symbol(symbol), {})
+
+# =========================
 # INDICATORS
 # =========================
 def ema(series, length):
@@ -193,7 +311,8 @@ def gate_symbols():
         for x in data:
             pair = x.get("id", "")
             if pair.endswith("_USDT") and x.get("trade_status") == "tradable":
-                symbols.append(pair)
+                if cmc_is_allowed(pair):
+                    symbols.append(pair)
         return symbols[:MAX_COINS]
     except Exception as e:
         print("Gate symbols error:", e)
@@ -249,7 +368,8 @@ def mexc_symbols():
         for x in data.get("symbols", []):
             s = x.get("symbol", "")
             if s.endswith("USDT") and x.get("status") == "ENABLED":
-                symbols.append(s)
+                if cmc_is_allowed(s):
+                    symbols.append(s)
         return symbols[:MAX_COINS]
     except Exception as e:
         print("MEXC symbols error:", e)
@@ -302,7 +422,8 @@ def kucoin_symbols():
         for x in data.get("data", []):
             s = x.get("symbol", "")
             if s.endswith("-USDT") and x.get("enableTrading"):
-                symbols.append(s)
+                if cmc_is_allowed(s):
+                    symbols.append(s)
         return symbols[:MAX_COINS]
     except Exception as e:
         print("KuCoin symbols error:", e)
@@ -354,7 +475,8 @@ def okx_symbols():
         for x in data.get("data", []):
             s = x.get("instId", "")
             if s.endswith("-USDT") and x.get("state") == "live":
-                symbols.append(s)
+                if cmc_is_allowed(s):
+                    symbols.append(s)
         return symbols[:MAX_COINS]
     except Exception as e:
         print("OKX symbols error:", e)
@@ -411,7 +533,8 @@ def bybit_symbols():
         for x in data.get("result", {}).get("list", []):
             s = x.get("symbol", "")
             if s.endswith("USDT") and x.get("status") == "Trading":
-                symbols.append(s)
+                if cmc_is_allowed(s):
+                    symbols.append(s)
         return symbols[:MAX_COINS]
     except Exception as e:
         print("Bybit symbols error:", e)
@@ -466,7 +589,8 @@ def bitget_symbols():
         for x in data.get("data", []):
             s = x.get("symbol", "")
             if s.endswith("USDT") and x.get("status") == "online":
-                symbols.append(s)
+                if cmc_is_allowed(s):
+                    symbols.append(s)
         return symbols[:MAX_COINS]
     except Exception as e:
         print("Bitget symbols error:", e)
@@ -595,6 +719,8 @@ def analyze_symbol(exchange, symbol, ticker_func, candle_func):
 
     sent_signals[key] = time.time()
 
+    cmc = get_cmc_info(symbol)
+
     return {
         "exchange": exchange,
         "symbol": normalize_symbol(symbol),
@@ -613,12 +739,26 @@ def analyze_symbol(exchange, symbol, ticker_func, candle_func):
         "tp1": current_price * 1.03,
         "tp2": current_price * 1.06,
         "tp3": current_price * 1.10,
-        "sl": current_price * 0.94
+        "sl": current_price * 0.94,
+        "cmc_name": cmc.get("name", ""),
+        "cmc_rank": cmc.get("rank", ""),
+        "market_cap": cmc.get("market_cap", 0),
+        "cmc_volume_24h": cmc.get("volume_24h", 0)
     }
 
 def format_signal(s):
     reasons = "\n".join(s["reasons"])
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    cmc_text = ""
+    if s["market_cap"]:
+        cmc_text = f"""
+🌐 <b>CoinMarketCap</b>
+الاسم: {s['cmc_name']}
+الترتيب: {s['cmc_rank']}
+Market Cap: ${s['market_cap']:,.0f}
+CMC 24H Volume: ${s['cmc_volume_24h']:,.0f}
+"""
 
     return f"""
 🟢 <b>EARLY REVERSAL ALERT</b>
@@ -642,9 +782,9 @@ D: {s['d']:.2f}
 متوسط آخر {VOLUME_LOOKBACK} شمعة: ${s['avg_volume']:,.0f}
 Volume Ratio: <b>{s['volume_ratio']:.2f}x</b>
 
-📊 24H Volume: ${s['quote_volume']:,.0f}
+📊 Exchange 24H Volume: ${s['quote_volume']:,.0f}
 📈 تغير 24H: {s['change_24h']:.2f}%
-
+{cmc_text}
 🎯 <b>الأهداف</b>
 TP1: {s['tp1']:.8f} (+3%)
 TP2: {s['tp2']:.8f} (+6%)
@@ -688,6 +828,12 @@ def startup_message():
 
 🏦 <b>المنصات المفعلة:</b>
 {exchange_text}
+
+🌐 <b>CoinMarketCap Filter:</b>
+الحالة: {'مفعل ✅' if USE_CMC_FILTER else 'غير مفعل ❌'}
+Top N: {CMC_TOP_N}
+Min Market Cap: ${MIN_MARKET_CAP:,.0f}
+Max Market Cap: ${MAX_MARKET_CAP:,.0f}
 
 🎯 <b>شروط الدخول الحالية:</b>
 • Stoch RSI K يخترق D
@@ -735,6 +881,8 @@ def scanner_loop():
 
     while True:
         try:
+            update_cmc_filter()
+
             if ENABLE_GATE:
                 scan_exchange("Gate", gate_symbols, gate_ticker, gate_candles)
 
