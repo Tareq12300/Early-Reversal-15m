@@ -7,9 +7,6 @@ from datetime import datetime
 from flask import Flask
 from threading import Thread
 
-# =========================
-# ENV SETTINGS
-# =========================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -26,6 +23,7 @@ MAX_COINS = int(os.getenv("MAX_COINS", "300"))
 MAX_RSI_BUY = float(os.getenv("MAX_RSI_BUY", "30"))
 MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "1.1"))
 MIN_VOLUME_USDT = float(os.getenv("MIN_VOLUME_USDT", "50000"))
+MIN_CURRENT_CANDLE_VOLUME = float(os.getenv("MIN_CURRENT_CANDLE_VOLUME", "8000"))
 VOLUME_LOOKBACK = int(os.getenv("VOLUME_LOOKBACK", "20"))
 MAX_24H_CHANGE = float(os.getenv("MAX_24H_CHANGE", "25"))
 
@@ -43,29 +41,19 @@ ENABLE_OKX = os.getenv("ENABLE_OKX", "true").lower() == "true"
 ENABLE_BYBIT = os.getenv("ENABLE_BYBIT", "true").lower() == "true"
 ENABLE_BITGET = os.getenv("ENABLE_BITGET", "true").lower() == "true"
 
-# =========================
-# FLASK
-# =========================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
     return "Early Reversal Bot with CMC Filter is running ✅"
 
-# =========================
-# FILTERS
-# =========================
 EXCLUDED_KEYWORDS = [
     "3L", "3S", "5L", "5S", "BULL", "BEAR",
     "UP", "DOWN", "LONG", "SHORT",
-
     "USDC", "BUSD", "DAI", "TUSD", "FDUSD", "USDP",
-
     "PEPE", "DOGE", "SHIB", "FLOKI", "BONK", "WIF",
     "MEME", "CAT", "DOG", "PUMP",
-
     "GAME", "GAMING", "CASINO", "BET", "PREDICT", "POLYMARKET",
-
     "BABAON", "NVDAX", "TSLA3S", "TSLA3L", "SBUXON"
 ]
 
@@ -73,9 +61,6 @@ sent_signals = {}
 cmc_allowed_symbols = {}
 last_cmc_update = 0
 
-# =========================
-# TELEGRAM
-# =========================
 def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print(message)
@@ -94,9 +79,6 @@ def send_telegram(message):
     except Exception as e:
         print("Telegram Error:", e)
 
-# =========================
-# HELPERS
-# =========================
 def safe_float(x, default=0):
     try:
         return float(x)
@@ -170,9 +152,6 @@ def convert_timeframe(exchange):
 
     return mapping.get(exchange, tf)
 
-# =========================
-# CMC FILTER
-# =========================
 def update_cmc_filter():
     global cmc_allowed_symbols, last_cmc_update
 
@@ -187,16 +166,13 @@ def update_cmc_filter():
 
     now = time.time()
 
-    # تحديث CMC كل ساعة فقط حتى لا يستهلك الطلبات
     if now - last_cmc_update < 3600 and cmc_allowed_symbols:
         return
 
     print("Updating CoinMarketCap filter...")
 
     url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-    headers = {
-        "X-CMC_PRO_API_KEY": CMC_API_KEY
-    }
+    headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
     params = {
         "start": "1",
         "limit": str(CMC_TOP_N),
@@ -273,9 +249,6 @@ def cmc_is_allowed(symbol):
 def get_cmc_info(symbol):
     return cmc_allowed_symbols.get(base_symbol(symbol), {})
 
-# =========================
-# INDICATORS
-# =========================
 def ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
 
@@ -300,9 +273,6 @@ def macd_hist(close):
     signal = ema(macd_line, 9)
     return macd_line - signal
 
-# =========================
-# GATE
-# =========================
 def gate_symbols():
     try:
         url = "https://api.gateio.ws/api/v4/spot/currency_pairs"
@@ -357,9 +327,6 @@ def gate_candles(symbol):
     except Exception:
         return None
 
-# =========================
-# MEXC
-# =========================
 def mexc_symbols():
     try:
         url = "https://api.mexc.com/api/v3/exchangeInfo"
@@ -411,9 +378,6 @@ def mexc_candles(symbol):
     except Exception:
         return None
 
-# =========================
-# KUCOIN
-# =========================
 def kucoin_symbols():
     try:
         url = "https://api.kucoin.com/api/v1/symbols"
@@ -464,9 +428,6 @@ def kucoin_candles(symbol):
     except Exception:
         return None
 
-# =========================
-# OKX
-# =========================
 def okx_symbols():
     try:
         url = "https://www.okx.com/api/v5/public/instruments?instType=SPOT"
@@ -521,9 +482,6 @@ def okx_candles(symbol):
     except Exception:
         return None
 
-# =========================
-# BYBIT
-# =========================
 def bybit_symbols():
     try:
         url = "https://api.bybit.com/v5/market/instruments-info"
@@ -578,9 +536,6 @@ def bybit_candles(symbol):
     except Exception:
         return None
 
-# =========================
-# BITGET
-# =========================
 def bitget_symbols():
     try:
         url = "https://api.bitget.com/api/v2/spot/public/symbols"
@@ -633,9 +588,6 @@ def bitget_candles(symbol):
     except Exception:
         return None
 
-# =========================
-# ANALYSIS
-# =========================
 def analyze_symbol(exchange, symbol, ticker_func, candle_func):
     if is_excluded(symbol):
         return None
@@ -678,6 +630,10 @@ def analyze_symbol(exchange, symbol, ticker_func, candle_func):
 
     current_price = close.iloc[-1]
     current_volume = volume.iloc[-1]
+
+    if current_volume < MIN_CURRENT_CANDLE_VOLUME:
+        return None
+
     avg_volume = volume.iloc[-(VOLUME_LOOKBACK + 1):-1].mean()
 
     if pd.isna(k_now) or pd.isna(d_now) or pd.isna(hist_now) or avg_volume <= 0:
@@ -799,9 +755,6 @@ SL: {s['sl']:.8f} (-6%)
 ⚠️ تحليل آلي فقط وليس نصيحة مالية.
 """
 
-# =========================
-# STARTUP MESSAGE
-# =========================
 def startup_message():
     exchanges = []
     if ENABLE_GATE:
@@ -840,6 +793,7 @@ Max Market Cap: ${MAX_MARKET_CAP:,.0f}
 • Stoch RSI أقل من {MAX_RSI_BUY}
 • MACD Histogram يتحسن
 • Volume Ratio أعلى من {MIN_VOLUME_RATIO}x
+• حجم الشمعة الحالية أعلى من ${MIN_CURRENT_CANDLE_VOLUME:,.0f}
 • 24H Change أقل من {MAX_24H_CHANGE}%
 
 💧 <b>فلتر الفوليوم:</b>
@@ -853,9 +807,6 @@ Max Market Cap: ${MAX_MARKET_CAP:,.0f}
 """
     send_telegram(msg)
 
-# =========================
-# SCANNER LOOP
-# =========================
 def scan_exchange(name, symbols_func, ticker_func, candle_func):
     try:
         symbols = symbols_func()
@@ -908,9 +859,6 @@ def scanner_loop():
 
         time.sleep(CHECK_INTERVAL)
 
-# =========================
-# RUN
-# =========================
 if __name__ == "__main__":
     Thread(target=scanner_loop, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
