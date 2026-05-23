@@ -40,6 +40,15 @@ REQUIRE_MACD_POSITIVE = os.getenv("REQUIRE_MACD_POSITIVE", "true").lower() == "t
 
 SIGNAL_COOLDOWN_HOURS = int(os.getenv("SIGNAL_COOLDOWN_HOURS", "6"))
 
+# =========================
+# TARGET ALERT SETTINGS
+# =========================
+TP1_PERCENT = float(os.getenv("TP1_PERCENT", "3"))
+TP2_PERCENT = float(os.getenv("TP2_PERCENT", "6"))
+TP3_PERCENT = float(os.getenv("TP3_PERCENT", "10"))
+SL_PERCENT = float(os.getenv("SL_PERCENT", "6"))
+ENABLE_TARGET_ALERTS = os.getenv("ENABLE_TARGET_ALERTS", "true").lower() == "true"
+
 ENABLE_GATE = os.getenv("ENABLE_GATE", "true").lower() == "true"
 ENABLE_MEXC = os.getenv("ENABLE_MEXC", "true").lower() == "true"
 ENABLE_KUCOIN = os.getenv("ENABLE_KUCOIN", "true").lower() == "true"
@@ -70,6 +79,7 @@ EXCLUDED_KEYWORDS = [
 ]
 
 sent_signals = {}
+active_trades = {}
 cmc_allowed_symbols = {}
 last_cmc_update = 0
 
@@ -576,10 +586,11 @@ def analyze_symbol(exchange, symbol, ticker_func, candle_func):
         "change_24h": change_24h,
         "score": score,
         "reasons": reasons,
-        "tp1": current_price * 1.03,
-        "tp2": current_price * 1.06,
-        "tp3": current_price * 1.10,
-        "sl": current_price * 0.94,
+        "raw_symbol": symbol,
+        "tp1": current_price * (1 + TP1_PERCENT / 100),
+        "tp2": current_price * (1 + TP2_PERCENT / 100),
+        "tp3": current_price * (1 + TP3_PERCENT / 100),
+        "sl": current_price * (1 - SL_PERCENT / 100),
         "cmc_name": cmc.get("name", ""),
         "cmc_rank": cmc.get("rank", ""),
         "market_cap": cmc.get("market_cap", 0),
@@ -626,10 +637,10 @@ Volume Ratio: <b>{s['volume_ratio']:.2f}x</b>
 📈 تغير 24H: {s['change_24h']:.2f}%
 {cmc_text}
 🎯 <b>الأهداف</b>
-TP1: {s['tp1']:.8f} (+3%)
-TP2: {s['tp2']:.8f} (+6%)
-TP3: {s['tp3']:.8f} (+10%)
-SL: {s['sl']:.8f} (-6%)
+TP1: {s['tp1']:.8f} (+{TP1_PERCENT:g}%)
+TP2: {s['tp2']:.8f} (+{TP2_PERCENT:g}%)
+TP3: {s['tp3']:.8f} (+{TP3_PERCENT:g}%)
+SL: {s['sl']:.8f} (-{SL_PERCENT:g}%)
 
 ⭐ قوة الإشارة: <b>{s['score']}%</b>
 
@@ -685,9 +696,134 @@ Max Market Cap: ${MAX_MARKET_CAP:,.0f}
 • أقل حجم تداول 24H: ${MIN_VOLUME_USDT:,.0f}
 • مقارنة الفوليوم مع آخر {VOLUME_LOOKBACK} شمعة
 
+🎯 <b>متابعة الأهداف:</b>
+• TP1 +{TP1_PERCENT:g}%
+• TP2 +{TP2_PERCENT:g}%
+• TP3 +{TP3_PERCENT:g}%
+• SL -{SL_PERCENT:g}%
+• تنبيهات الأهداف: {'مفعلة ✅' if ENABLE_TARGET_ALERTS else 'غير مفعلة ❌'}
+
 ✅ البوت يعمل الآن...
 """
     send_telegram(msg)
+
+# =========================
+# TARGET MONITORING
+# =========================
+def add_active_trade(signal):
+    if not ENABLE_TARGET_ALERTS:
+        return
+
+    key = f"{signal['exchange']}:{signal['raw_symbol']}"
+
+    # لا نعيد فتح نفس الصفقة إذا كانت ما زالت تحت المتابعة
+    if key in active_trades:
+        return
+
+    active_trades[key] = {
+        "exchange": signal["exchange"],
+        "symbol": signal["symbol"],
+        "raw_symbol": signal["raw_symbol"],
+        "entry": signal["price"],
+        "tp1": signal["tp1"],
+        "tp2": signal["tp2"],
+        "tp3": signal["tp3"],
+        "sl": signal["sl"],
+        "tp1_sent": False,
+        "tp2_sent": False,
+        "tp3_sent": False,
+        "created_at": time.time()
+    }
+
+def format_target_alert(trade, target_name, target_price, current_price, profit_percent):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    if target_name == "SL":
+        title = "🔴 تم ضرب وقف الخسارة"
+        target_line = f"🛑 وقف الخسارة: <b>{target_price:.8f}</b>"
+    else:
+        title = f"🎯 تم تحقيق {target_name}"
+        target_line = f"🎯 الهدف: <b>{target_price:.8f}</b>"
+
+    return f"""
+{title}
+━━━━━━━━━━━━━━
+⏰ الوقت: {now}
+🏦 المنصة: <b>{trade['exchange']}</b>
+🪙 العملة: <b>{trade['symbol']}</b>
+
+💰 سعر الدخول: <b>{trade['entry']:.8f}</b>
+💵 السعر الحالي: <b>{current_price:.8f}</b>
+{target_line}
+
+📈 النتيجة من الدخول: <b>{profit_percent:.2f}%</b>
+
+✅ تنبيه آلي لمتابعة الأهداف.
+⚠️ تحليل آلي فقط وليس نصيحة مالية.
+"""
+
+def get_price_for_trade(exchange, raw_symbol):
+    funcs = {
+        "Gate": gate_ticker,
+        "MEXC": mexc_ticker,
+        "KuCoin": kucoin_ticker,
+        "OKX": okx_ticker,
+        "Bybit": bybit_ticker,
+        "Bitget": bitget_ticker
+    }
+
+    ticker_func = funcs.get(exchange)
+    if not ticker_func:
+        return None
+
+    ticker = ticker_func(raw_symbol)
+    if not ticker:
+        return None
+
+    price = ticker.get("price", 0)
+    return price if price and price > 0 else None
+
+def monitor_active_trades():
+    if not ENABLE_TARGET_ALERTS or not active_trades:
+        return
+
+    closed_keys = []
+
+    for key, trade in list(active_trades.items()):
+        try:
+            current_price = get_price_for_trade(trade["exchange"], trade["raw_symbol"])
+            if current_price is None:
+                continue
+
+            profit_percent = ((current_price - trade["entry"]) / trade["entry"]) * 100
+
+            # وقف الخسارة يغلق المتابعة مباشرة
+            if current_price <= trade["sl"]:
+                send_telegram(format_target_alert(trade, "SL", trade["sl"], current_price, profit_percent))
+                closed_keys.append(key)
+                continue
+
+            # إرسال تنبيه لكل هدف مرة واحدة فقط
+            if not trade["tp1_sent"] and current_price >= trade["tp1"]:
+                send_telegram(format_target_alert(trade, "TP1", trade["tp1"], current_price, profit_percent))
+                trade["tp1_sent"] = True
+
+            if not trade["tp2_sent"] and current_price >= trade["tp2"]:
+                send_telegram(format_target_alert(trade, "TP2", trade["tp2"], current_price, profit_percent))
+                trade["tp2_sent"] = True
+
+            if not trade["tp3_sent"] and current_price >= trade["tp3"]:
+                send_telegram(format_target_alert(trade, "TP3", trade["tp3"], current_price, profit_percent))
+                trade["tp3_sent"] = True
+                closed_keys.append(key)
+
+            time.sleep(0.1)
+
+        except Exception as e:
+            print("Target monitoring error:", key, e)
+
+    for key in closed_keys:
+        active_trades.pop(key, None)
 
 def scan_exchange(name, symbols_func, ticker_func, candle_func):
     try:
@@ -700,6 +836,7 @@ def scan_exchange(name, symbols_func, ticker_func, candle_func):
             if signal:
                 found += 1
                 send_telegram(format_signal(signal))
+                add_active_trade(signal)
                 print(f"Signal Found: {name} {symbol}")
             time.sleep(0.15)
 
@@ -714,6 +851,7 @@ def scanner_loop():
     while True:
         try:
             update_cmc_filter()
+            monitor_active_trades()
 
             if ENABLE_GATE:
                 scan_exchange("Gate", gate_symbols, gate_ticker, gate_candles)
@@ -728,6 +866,7 @@ def scanner_loop():
             if ENABLE_BITGET:
                 scan_exchange("Bitget", bitget_symbols, bitget_ticker, bitget_candles)
 
+            monitor_active_trades()
             print("Full scan finished.")
 
         except Exception as e:
