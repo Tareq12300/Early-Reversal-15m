@@ -523,7 +523,9 @@ def analyze_symbol(exchange, symbol, ticker_func, candle_func):
     stoch_cross = k_prev <= d_prev and k_now > d_now
     stoch_low = k_now < MAX_RSI_BUY
     macd_rising = (hist_now > hist_prev) if REQUIRE_MACD_RISING else True
-    macd_positive = (hist_now > 0) if REQUIRE_MACD_POSITIVE else True
+    macd_positive = (
+        hist_now > abs(hist_prev)
+    ) if REQUIRE_MACD_POSITIVE else True
     volume_ok = volume_ratio >= MIN_VOLUME_RATIO
     price_above_ema20 = current_price > ema20.iloc[-1]
 
@@ -548,7 +550,7 @@ def analyze_symbol(exchange, symbol, ticker_func, candle_func):
         reasons.append("✅ MACD Histogram يتحسن")
     if REQUIRE_MACD_POSITIVE and hist_now > 0:
         score += 15
-        reasons.append("✅ MACD Histogram موجب")
+        reasons.append("✅ MACD Histogram موجب بقوة")
     if volume_ok:
         score += 15
         reasons.append(f"✅ Volume Ratio أعلى من {MIN_VOLUME_RATIO}x")
