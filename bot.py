@@ -9,9 +9,6 @@ import ccxt
 import pytz
 from flask import Flask
 
-from telegram import Bot
-from telegram.constants import ParseMode
-
 
 # =========================
 # ENV HELPERS
@@ -24,20 +21,15 @@ def env_str(name, default=""):
 def env_int(name, default):
     try:
         return int(os.getenv(name, default))
-    except Exception:
+    except:
         return default
 
 
 def env_float(name, default):
     try:
         return float(os.getenv(name, default))
-    except Exception:
+    except:
         return default
-
-
-def env_bool(name, default=True):
-    value = os.getenv(name, str(default)).lower().strip()
-    return value in ["true", "1", "yes", "y", "on"]
 
 
 # =========================
@@ -49,6 +41,7 @@ TELEGRAM_CHANNEL_ID = env_str("TELEGRAM_CHANNEL_ID")
 CMC_API_KEY = env_str("CMC_API_KEY")
 
 CMC_TOP_N = env_int("CMC_TOP_N", 1000)
+
 CHECK_INTERVAL = env_int("CHECK_INTERVAL", 3600)
 
 TREND_TIMEFRAME = env_str("TREND_TIMEFRAME", "1d")
@@ -90,16 +83,26 @@ def home():
 # TELEGRAM
 # =========================
 
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
-
-
 def send_telegram(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
+        print("Telegram not configured")
+        return
+
     try:
-        bot.send_message(
-            chat_id=TELEGRAM_CHANNEL_ID,
-            text=message,
-            parse_mode=ParseMode.MARKDOWN
-        )
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+        payload = {
+            "chat_id": TELEGRAM_CHANNEL_ID,
+            "text": message,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
+        }
+
+        r = requests.post(url, json=payload, timeout=20)
+
+        if r.status_code != 200:
+            print(f"Telegram Error: {r.text}")
+
     except Exception as e:
         print(f"Telegram Error: {e}")
 
@@ -115,6 +118,7 @@ def load_json(path, default):
                 return json.load(f)
     except:
         pass
+
     return default
 
 
@@ -159,6 +163,7 @@ def get_cmc_symbols():
 
     try:
         r = requests.get(url, headers=headers, params=params, timeout=30)
+
         data = r.json()["data"]
 
         symbols = []
@@ -318,6 +323,7 @@ def macd(closes, fast=12, slow=26, signal=9):
 def analyze(exchange, symbol):
     try:
         trend_data = exchange.fetch_ohlcv(symbol, TREND_TIMEFRAME, limit=150)
+
         entry_data = exchange.fetch_ohlcv(symbol, ENTRY_TIMEFRAME, limit=150)
 
         if not trend_data or not entry_data:
@@ -382,7 +388,7 @@ def analyze(exchange, symbol):
 
 
 # =========================
-# SIGNAL MESSAGE
+# MESSAGE
 # =========================
 
 def signal_message(exchange_name, symbol, data):
@@ -391,40 +397,41 @@ def signal_message(exchange_name, symbol, data):
     tp1 = price * (1 + TP1_PERCENT / 100)
     tp2 = price * (1 + TP2_PERCENT / 100)
     tp3 = price * (1 + TP3_PERCENT / 100)
+
     sl = price * (1 - SL_PERCENT / 100)
 
     return f"""
-🟢 *MULTI-TIMEFRAME TREND ALERT*
+🟢 MULTI-TIMEFRAME TREND ALERT
 ━━━━━━━━━━━━━━
 
-🏦 المنصة: *{exchange_name}*
-🪙 العملة: *{symbol}*
-💰 سعر الدخول: `{price:.8f}`
+🏦 المنصة: {exchange_name}
+🪙 العملة: {symbol}
+💰 سعر الدخول: {price:.8f}
 
 📈 الاتجاه العام:
 • {TREND_TIMEFRAME} صاعد ✅
 • {ENTRY_TIMEFRAME} صاعد ✅
 
 📊 Stoch RSI
-K: `{data["k"]:.2f}`
-D: `{data["d"]:.2f}`
+K: {data["k"]:.2f}
+D: {data["d"]:.2f}
 
 📈 MACD Histogram
-الحالي: `{data["macd"]:.8f}`
-السابق: `{data["macd_prev"]:.8f}`
+الحالي: {data["macd"]:.8f}
+السابق: {data["macd_prev"]:.8f}
 
 💧 Volume
-الحالي: `${data["current_volume"]:,.0f}`
-المتوسط: `${data["avg_volume"]:,.0f}`
-Volume Ratio: `{data["volume_ratio"]:.2f}x`
+الحالي: ${data["current_volume"]:,.0f}
+المتوسط: ${data["avg_volume"]:,.0f}
+Volume Ratio: {data["volume_ratio"]:.2f}x
 
 🎯 Targets
-TP1: `{tp1:.8f}` (+{TP1_PERCENT}%)
-TP2: `{tp2:.8f}` (+{TP2_PERCENT}%)
-TP3: `{tp3:.8f}` (+{TP3_PERCENT}%)
+TP1: {tp1:.8f} (+{TP1_PERCENT}%)
+TP2: {tp2:.8f} (+{TP2_PERCENT}%)
+TP3: {tp3:.8f} (+{TP3_PERCENT}%)
 
 🛑 Stop Loss
-`{sl:.8f}` (-{SL_PERCENT}%)
+{sl:.8f} (-{SL_PERCENT}%)
 
 ✅ سيتم إرسال تنبيه عند تحقق كل هدف.
 """
@@ -436,24 +443,24 @@ TP3: `{tp3:.8f}` (+{TP3_PERCENT}%)
 
 def startup_message():
     return f"""
-🤖 *بوت توافق الاتجاه اشتغل بنجاح ✅*
+🤖 بوت توافق الاتجاه اشتغل بنجاح ✅
 ━━━━━━━━━━━━━━
 
-📈 فريم الاتجاه: `{TREND_TIMEFRAME}`
-📈 فريم الدخول: `{ENTRY_TIMEFRAME}`
+📈 فريم الاتجاه: {TREND_TIMEFRAME}
+📈 فريم الدخول: {ENTRY_TIMEFRAME}
 
-⏱️ الفحص كل: `{CHECK_INTERVAL}` ثانية
+⏱️ الفحص كل: {CHECK_INTERVAL} ثانية
 
 🌐 CoinMarketCap:
-Top `{CMC_TOP_N}` عملة
+Top {CMC_TOP_N} عملة
 
 🎯 شروط الدخول:
 • الاتجاه العام صاعد
 • الاتجاه الحالي صاعد
-• Stoch RSI أقل من `{MAX_STOCH_RSI}`
+• Stoch RSI أقل من {MAX_STOCH_RSI}
 • K أعلى من D
 • MACD موجب ويتحسن
-• Volume Ratio أعلى من `{MIN_VOLUME_RATIO}x`
+• Volume Ratio أعلى من {MIN_VOLUME_RATIO}x
 
 🎯 الأهداف:
 • TP1 +{TP1_PERCENT}%
@@ -468,7 +475,7 @@ Top `{CMC_TOP_N}` عملة
 
 
 # =========================
-# TARGET MONITOR
+# TARGETS
 # =========================
 
 def register_signal(exchange_name, symbol, price):
@@ -509,47 +516,36 @@ def monitor_targets():
                     continue
 
                 ticker = exchange.fetch_ticker(symbol)
+
                 price = ticker["last"]
 
                 if not signal["tp1_hit"] and price >= signal["tp1"]:
                     signal["tp1_hit"] = True
 
-                    send_telegram(f"""
-🎯 *TP1 تحقق ✅*
-
-🪙 {symbol}
-📈 +{TP1_PERCENT}%
-""")
+                    send_telegram(
+                        f"🎯 TP1 تحقق ✅\n\n🪙 {symbol}\n📈 +{TP1_PERCENT}%"
+                    )
 
                 if not signal["tp2_hit"] and price >= signal["tp2"]:
                     signal["tp2_hit"] = True
 
-                    send_telegram(f"""
-🎯 *TP2 تحقق ✅*
-
-🪙 {symbol}
-📈 +{TP2_PERCENT}%
-""")
+                    send_telegram(
+                        f"🎯 TP2 تحقق ✅\n\n🪙 {symbol}\n📈 +{TP2_PERCENT}%"
+                    )
 
                 if not signal["tp3_hit"] and price >= signal["tp3"]:
                     signal["tp3_hit"] = True
 
-                    send_telegram(f"""
-🎯 *TP3 تحقق ✅*
-
-🪙 {symbol}
-📈 +{TP3_PERCENT}%
-""")
+                    send_telegram(
+                        f"🎯 TP3 تحقق ✅\n\n🪙 {symbol}\n📈 +{TP3_PERCENT}%"
+                    )
 
                 if not signal["sl_hit"] and price <= signal["sl"]:
                     signal["sl_hit"] = True
 
-                    send_telegram(f"""
-🛑 *STOP LOSS*
-
-🪙 {symbol}
-📉 -{SL_PERCENT}%
-""")
+                    send_telegram(
+                        f"🛑 STOP LOSS\n\n🪙 {symbol}\n📉 -{SL_PERCENT}%"
+                    )
 
                 if signal["tp3_hit"] or signal["sl_hit"]:
                     active_signals.pop(key, None)
@@ -605,6 +601,7 @@ def scanner_loop():
                         )
 
                         sent_signals[signal_key] = True
+
                         save_json(SENT_FILE, sent_signals)
 
                         signals_found += 1
@@ -625,6 +622,7 @@ def scanner_loop():
 
 if __name__ == "__main__":
     threading.Thread(target=scanner_loop, daemon=True).start()
+
     threading.Thread(target=monitor_targets, daemon=True).start()
 
     port = int(os.getenv("PORT", 8080))
