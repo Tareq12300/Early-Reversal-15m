@@ -1,6 +1,4 @@
-python-telegram-bot==21.6
-requests
-pytz
-flask
-pandas
-numpy
+requests==2.32.3
+ccxt==4.4.87
+flask==3.0.3
+pytz==2024.1
