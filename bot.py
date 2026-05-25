@@ -10,10 +10,6 @@ import pytz
 from flask import Flask
 
 
-# =========================
-# ENV HELPERS
-# =========================
-
 def env_str(name, default=""):
     return os.getenv(name, default).strip()
 
@@ -32,16 +28,11 @@ def env_float(name, default):
         return default
 
 
-# =========================
-# VARIABLES
-# =========================
-
 TELEGRAM_BOT_TOKEN = env_str("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = env_str("TELEGRAM_CHANNEL_ID")
 CMC_API_KEY = env_str("CMC_API_KEY")
 
 CMC_TOP_N = env_int("CMC_TOP_N", 1000)
-
 CHECK_INTERVAL = env_int("CHECK_INTERVAL", 3600)
 
 TREND_TIMEFRAME = env_str("TREND_TIMEFRAME", "1d")
@@ -68,20 +59,13 @@ SIGNALS_FILE = "active_signals.json"
 SENT_FILE = "sent_signals.json"
 
 
-# =========================
-# FLASK
-# =========================
-
 app = Flask(__name__)
+
 
 @app.route("/")
 def home():
     return "Bot Running ✅"
 
-
-# =========================
-# TELEGRAM
-# =========================
 
 def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
@@ -107,10 +91,6 @@ def send_telegram(message):
         print(f"Telegram Error: {e}")
 
 
-# =========================
-# STORAGE
-# =========================
-
 def load_json(path, default):
     try:
         if os.path.exists(path):
@@ -131,10 +111,6 @@ active_signals = load_json(SIGNALS_FILE, {})
 sent_signals = load_json(SENT_FILE, {})
 
 
-# =========================
-# EXCHANGES
-# =========================
-
 EXCHANGES = [
     ("Gate", ccxt.gateio()),
     ("KuCoin", ccxt.kucoin()),
@@ -143,10 +119,6 @@ EXCHANGES = [
     ("Bitget", ccxt.bitget())
 ]
 
-
-# =========================
-# CMC
-# =========================
 
 def get_cmc_symbols():
     url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
@@ -163,14 +135,12 @@ def get_cmc_symbols():
 
     try:
         r = requests.get(url, headers=headers, params=params, timeout=30)
-
         data = r.json()["data"]
 
         symbols = []
 
         for coin in data:
             symbol = coin["symbol"].upper()
-
             volume_24h = coin["quote"]["USD"]["volume_24h"]
 
             if volume_24h >= MIN_24H_VOLUME_USD:
@@ -183,17 +153,15 @@ def get_cmc_symbols():
         return []
 
 
-# =========================
-# INDICATORS
-# =========================
-
 def ema(values, period):
-    result = []
+    if len(values) < period:
+        return [None] * len(values)
 
+    result = []
     multiplier = 2 / (period + 1)
 
-    sma = sum(values[:period]) / period
-    result.append(sma)
+    sma_value = sum(values[:period]) / period
+    result.append(sma_value)
 
     for price in values[period:]:
         value = (price - result[-1]) * multiplier + result[-1]
@@ -203,12 +171,14 @@ def ema(values, period):
 
 
 def rsi(values, period=14):
+    if len(values) <= period:
+        return [None] * len(values)
+
     gains = []
     losses = []
 
     for i in range(1, len(values)):
         diff = values[i] - values[i - 1]
-
         gains.append(max(diff, 0))
         losses.append(abs(min(diff, 0)))
 
@@ -227,7 +197,10 @@ def rsi(values, period=14):
             rs = avg_gain / avg_loss
             rsis.append(100 - (100 / (1 + rs)))
 
-    return rsis
+    while len(rsis) < len(values):
+        rsis.append(None)
+
+    return rsis[:len(values)]
 
 
 def sma(values, period):
@@ -292,10 +265,12 @@ def macd(closes, fast=12, slow=26, signal=9):
 
     valid = [x for x in macd_line if x is not None]
 
+    if len(valid) < signal:
+        return [None] * len(closes)
+
     signal_line_valid = ema(valid, signal)
 
     signal_line = []
-
     idx = 0
 
     for x in macd_line:
@@ -316,14 +291,75 @@ def macd(closes, fast=12, slow=26, signal=9):
     return histogram
 
 
-# =========================
-# ANALYSIS
-# =========================
+def calculate_potential_score(
+    entry_close,
+    entry_ema,
+    k_value,
+    d_value,
+    macd_now,
+    macd_prev,
+    volume_ratio,
+    current_volume
+):
+    score = 0
+
+    if entry_close > entry_ema:
+        score += 15
+
+    if k_value > d_value:
+        score += 15
+
+    if k_value < 20:
+        score += 20
+    elif k_value < 40:
+        score += 15
+    elif k_value < 60:
+        score += 5
+
+    if macd_now > 0:
+        score += 20
+
+    if macd_now > macd_prev:
+        score += 15
+
+    if volume_ratio >= 5:
+        score += 25
+    elif volume_ratio >= 3:
+        score += 20
+    elif volume_ratio >= 1.5:
+        score += 15
+    elif volume_ratio >= 1:
+        score += 10
+
+    if current_volume >= 100000:
+        score += 10
+    elif current_volume >= 50000:
+        score += 7
+    elif current_volume >= 10000:
+        score += 5
+
+    if score > 100:
+        score = 100
+
+    if score >= 85:
+        potential = "انفجارية جدًا 🚀"
+        potential_range = "50% - 150%"
+    elif score >= 70:
+        potential = "قوية 🔥"
+        potential_range = "20% - 50%"
+    elif score >= 55:
+        potential = "متوسطة 📈"
+        potential_range = "10% - 20%"
+    else:
+        potential = "ضعيفة / محدودة ⚠️"
+        potential_range = "3% - 8%"
+
+    return score, potential, potential_range
+
 
 def analyze(exchange, symbol):
     try:
         trend_data = exchange.fetch_ohlcv(symbol, TREND_TIMEFRAME, limit=150)
-
         entry_data = exchange.fetch_ohlcv(symbol, ENTRY_TIMEFRAME, limit=150)
 
         if not trend_data or not entry_data:
@@ -339,6 +375,17 @@ def analyze(exchange, symbol):
         entry_macd = macd(entry_closes)
 
         k, d = stoch_rsi(entry_closes)
+
+        if (
+            trend_ema[-1] is None or
+            entry_ema[-1] is None or
+            trend_macd[-1] is None or
+            entry_macd[-1] is None or
+            entry_macd[-2] is None or
+            k[-1] is None or
+            d[-1] is None
+        ):
+            return None
 
         trend_close = trend_closes[-1]
         entry_close = entry_closes[-1]
@@ -369,6 +416,17 @@ def analyze(exchange, symbol):
             and current_volume >= MIN_CANDLE_VOLUME_USD
         )
 
+        score, potential, potential_range = calculate_potential_score(
+            entry_close=entry_close,
+            entry_ema=entry_ema[-1],
+            k_value=k[-1],
+            d_value=d[-1],
+            macd_now=entry_macd[-1],
+            macd_prev=entry_macd[-2],
+            volume_ratio=volume_ratio,
+            current_volume=current_volume
+        )
+
         if trend_ok and entry_ok:
             return {
                 "price": entry_close,
@@ -378,7 +436,10 @@ def analyze(exchange, symbol):
                 "macd_prev": entry_macd[-2],
                 "volume_ratio": volume_ratio,
                 "current_volume": current_volume,
-                "avg_volume": avg_volume
+                "avg_volume": avg_volume,
+                "score": score,
+                "potential": potential,
+                "potential_range": potential_range
             }
 
     except Exception as e:
@@ -387,17 +448,12 @@ def analyze(exchange, symbol):
     return None
 
 
-# =========================
-# MESSAGE
-# =========================
-
 def signal_message(exchange_name, symbol, data):
     price = data["price"]
 
     tp1 = price * (1 + TP1_PERCENT / 100)
     tp2 = price * (1 + TP2_PERCENT / 100)
     tp3 = price * (1 + TP3_PERCENT / 100)
-
     sl = price * (1 - SL_PERCENT / 100)
 
     return f"""
@@ -425,6 +481,11 @@ D: {data["d"]:.2f}
 المتوسط: ${data["avg_volume"]:,.0f}
 Volume Ratio: {data["volume_ratio"]:.2f}x
 
+🔥 قوة الحركة المتوقعة
+التقييم: {data["potential"]}
+النطاق المحتمل: {data["potential_range"]}
+Score: {data["score"]}/100
+
 🎯 Targets
 TP1: {tp1:.8f} (+{TP1_PERCENT}%)
 TP2: {tp2:.8f} (+{TP2_PERCENT}%)
@@ -436,10 +497,6 @@ TP3: {tp3:.8f} (+{TP3_PERCENT}%)
 ✅ سيتم إرسال تنبيه عند تحقق كل هدف.
 """
 
-
-# =========================
-# STARTUP MESSAGE
-# =========================
 
 def startup_message():
     return f"""
@@ -462,6 +519,11 @@ Top {CMC_TOP_N} عملة
 • MACD موجب ويتحسن
 • Volume Ratio أعلى من {MIN_VOLUME_RATIO}x
 
+🔥 تقييم قوة الحركة:
+• Score من 100
+• تقدير نطاق الصعود المحتمل
+• يعتمد على MACD + Stoch RSI + Volume + EMA
+
 🎯 الأهداف:
 • TP1 +{TP1_PERCENT}%
 • TP2 +{TP2_PERCENT}%
@@ -473,10 +535,6 @@ Top {CMC_TOP_N} عملة
 ✅ تنبيه عند كل هدف.
 """
 
-
-# =========================
-# TARGETS
-# =========================
 
 def register_signal(exchange_name, symbol, price):
     key = f"{exchange_name}:{symbol}"
@@ -516,35 +574,30 @@ def monitor_targets():
                     continue
 
                 ticker = exchange.fetch_ticker(symbol)
-
                 price = ticker["last"]
 
                 if not signal["tp1_hit"] and price >= signal["tp1"]:
                     signal["tp1_hit"] = True
-
                     send_telegram(
-                        f"🎯 TP1 تحقق ✅\n\n🪙 {symbol}\n📈 +{TP1_PERCENT}%"
+                        f"🎯 TP1 تحقق ✅\n\n🪙 {symbol}\n💰 السعر الحالي: {price:.8f}\n📈 +{TP1_PERCENT}%"
                     )
 
                 if not signal["tp2_hit"] and price >= signal["tp2"]:
                     signal["tp2_hit"] = True
-
                     send_telegram(
-                        f"🎯 TP2 تحقق ✅\n\n🪙 {symbol}\n📈 +{TP2_PERCENT}%"
+                        f"🎯 TP2 تحقق ✅\n\n🪙 {symbol}\n💰 السعر الحالي: {price:.8f}\n📈 +{TP2_PERCENT}%"
                     )
 
                 if not signal["tp3_hit"] and price >= signal["tp3"]:
                     signal["tp3_hit"] = True
-
                     send_telegram(
-                        f"🎯 TP3 تحقق ✅\n\n🪙 {symbol}\n📈 +{TP3_PERCENT}%"
+                        f"🎯 TP3 تحقق ✅\n\n🪙 {symbol}\n💰 السعر الحالي: {price:.8f}\n📈 +{TP3_PERCENT}%"
                     )
 
                 if not signal["sl_hit"] and price <= signal["sl"]:
                     signal["sl_hit"] = True
-
                     send_telegram(
-                        f"🛑 STOP LOSS\n\n🪙 {symbol}\n📉 -{SL_PERCENT}%"
+                        f"🛑 STOP LOSS\n\n🪙 {symbol}\n💰 السعر الحالي: {price:.8f}\n📉 -{SL_PERCENT}%"
                     )
 
                 if signal["tp3_hit"] or signal["sl_hit"]:
@@ -558,10 +611,6 @@ def monitor_targets():
         time.sleep(60)
 
 
-# =========================
-# SCANNER
-# =========================
-
 def scanner_loop():
     send_telegram(startup_message())
 
@@ -569,7 +618,6 @@ def scanner_loop():
         print("Scanning CoinMarketCap...")
 
         symbols = get_cmc_symbols()
-
         signals_found = 0
 
         for exchange_name, exchange in EXCHANGES:
@@ -590,41 +638,26 @@ def scanner_loop():
                     data = analyze(exchange, symbol)
 
                     if data:
-                        send_telegram(
-                            signal_message(exchange_name, symbol, data)
-                        )
+                        send_telegram(signal_message(exchange_name, symbol, data))
 
-                        register_signal(
-                            exchange_name,
-                            symbol,
-                            data["price"]
-                        )
+                        register_signal(exchange_name, symbol, data["price"])
 
                         sent_signals[signal_key] = True
-
                         save_json(SENT_FILE, sent_signals)
 
                         signals_found += 1
-
                         time.sleep(2)
 
             except Exception as e:
                 print(f"{exchange_name} Error: {e}")
 
         print(f"Signals Found: {signals_found}")
-
         time.sleep(CHECK_INTERVAL)
 
 
-# =========================
-# MAIN
-# =========================
-
 if __name__ == "__main__":
     threading.Thread(target=scanner_loop, daemon=True).start()
-
     threading.Thread(target=monitor_targets, daemon=True).start()
 
     port = int(os.getenv("PORT", 8080))
-
     app.run(host="0.0.0.0", port=port)
