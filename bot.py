@@ -2,7 +2,6 @@ import os
 import time
 import json
 import threading
-from datetime import datetime
 
 import requests
 import ccxt
@@ -57,16 +56,16 @@ STOCH_RSI_PERIOD = env_int("STOCH_RSI_PERIOD", 14)
 
 MAX_STOCH_RSI = env_float("MAX_STOCH_RSI", 60)
 
-MIN_VOLUME_RATIO = env_float("MIN_VOLUME_RATIO", 0.1)
-MIN_CANDLE_VOLUME_USD = env_float("MIN_CANDLE_VOLUME_USD", 8000)
-MIN_24H_VOLUME_USD = env_float("MIN_24H_VOLUME_USD", 50000)
+MIN_VOLUME_RATIO = env_float("MIN_VOLUME_RATIO", 0.3)
+MIN_CANDLE_VOLUME_USD = env_float("MIN_CANDLE_VOLUME_USD", 15000)
+MIN_24H_VOLUME_USD = env_float("MIN_24H_VOLUME_USD", 100000)
 
 REQUIRE_TREND_CLOSE_ABOVE_EMA = env_bool("REQUIRE_TREND_CLOSE_ABOVE_EMA", False)
 REQUIRE_TREND_MACD_POSITIVE = env_bool("REQUIRE_TREND_MACD_POSITIVE", True)
 
 REQUIRE_ENTRY_CLOSE_ABOVE_EMA = env_bool("REQUIRE_ENTRY_CLOSE_ABOVE_EMA", False)
 REQUIRE_ENTRY_STOCH_K_ABOVE_D = env_bool("REQUIRE_ENTRY_STOCH_K_ABOVE_D", True)
-REQUIRE_ENTRY_MACD_POSITIVE = env_bool("REQUIRE_ENTRY_MACD_POSITIVE", True)
+REQUIRE_ENTRY_MACD_POSITIVE = env_bool("REQUIRE_ENTRY_MACD_POSITIVE", False)
 REQUIRE_ENTRY_MACD_RISING = env_bool("REQUIRE_ENTRY_MACD_RISING", True)
 
 ENABLE_GATE = env_bool("ENABLE_GATE", True)
@@ -99,16 +98,24 @@ def home():
 # =========================================
 
 def send_telegram(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
+        print("Telegram not configured")
+        return
+
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
         payload = {
             "chat_id": TELEGRAM_CHANNEL_ID,
             "text": message,
-            "parse_mode": "Markdown"
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True
         }
 
-        requests.post(url, json=payload, timeout=20)
+        r = requests.post(url, json=payload, timeout=20)
+
+        if r.status_code != 200:
+            print(f"Telegram Error: {r.text}")
 
     except Exception as e:
         print(f"Telegram Error: {e}")
@@ -164,6 +171,10 @@ if ENABLE_BITGET:
 # =========================================
 
 def get_cmc_symbols():
+    if not CMC_API_KEY:
+        print("CMC_API_KEY missing")
+        return []
+
     url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
 
     headers = {
@@ -178,14 +189,12 @@ def get_cmc_symbols():
 
     try:
         r = requests.get(url, headers=headers, params=params, timeout=30)
-
-        data = r.json()["data"]
+        data = r.json().get("data", [])
 
         symbols = []
 
         for coin in data:
             symbol = coin["symbol"].upper()
-
             volume_24h = coin["quote"]["USD"]["volume_24h"]
 
             if volume_24h >= MIN_24H_VOLUME_USD:
@@ -207,12 +216,10 @@ def ema(values, period):
         return [None] * len(values)
 
     result = []
-
     multiplier = 2 / (period + 1)
 
-    sma = sum(values[:period]) / period
-
-    result.append(sma)
+    sma_value = sum(values[:period]) / period
+    result.append(sma_value)
 
     for price in values[period:]:
         value = ((price - result[-1]) * multiplier) + result[-1]
@@ -230,7 +237,6 @@ def rsi(values, period=14):
 
     for i in range(1, len(values)):
         diff = values[i] - values[i - 1]
-
         gains.append(max(diff, 0))
         losses.append(abs(min(diff, 0)))
 
@@ -262,9 +268,9 @@ def sma(values, period):
         if i + 1 < period:
             result.append(None)
         else:
-            window = [x for x in values[i + 1 - period:i + 1] if x is not None]
+            window = values[i + 1 - period:i + 1]
 
-            if len(window) < period:
+            if any(x is None for x in window):
                 result.append(None)
             else:
                 result.append(sum(window) / period)
@@ -320,10 +326,12 @@ def macd(closes, fast=12, slow=26, signal=9):
 
     valid = [x for x in macd_line if x is not None]
 
+    if len(valid) < signal:
+        return [None] * len(closes)
+
     signal_valid = ema(valid, signal)
 
     signal_line = []
-
     idx = 0
 
     for x in macd_line:
@@ -350,17 +358,8 @@ def macd(closes, fast=12, slow=26, signal=9):
 
 def analyze(exchange, symbol):
     try:
-        trend_data = exchange.fetch_ohlcv(
-            symbol,
-            TREND_TIMEFRAME,
-            limit=150
-        )
-
-        entry_data = exchange.fetch_ohlcv(
-            symbol,
-            ENTRY_TIMEFRAME,
-            limit=150
-        )
+        trend_data = exchange.fetch_ohlcv(symbol, TREND_TIMEFRAME, limit=150)
+        entry_data = exchange.fetch_ohlcv(symbol, ENTRY_TIMEFRAME, limit=150)
 
         if not trend_data or not entry_data:
             return None
@@ -393,11 +392,10 @@ def analyze(exchange, symbol):
         current_volume = entry_data[-1][4] * entry_data[-1][5]
 
         avg_volume = 0
-
         for c in entry_data[-21:-1]:
             avg_volume += c[4] * c[5]
 
-        avg_volume /= 20
+        avg_volume = avg_volume / 20 if avg_volume > 0 else 0
 
         volume_ratio = current_volume / avg_volume if avg_volume > 0 else 0
 
@@ -435,8 +433,13 @@ def analyze(exchange, symbol):
                 "k": k[-1],
                 "d": d[-1],
                 "macd": entry_macd[-1],
+                "macd_prev": entry_macd[-2],
                 "volume_ratio": volume_ratio,
-                "current_volume": current_volume
+                "current_volume": current_volume,
+                "avg_volume": avg_volume,
+                "trend_close": trend_close,
+                "trend_ema": trend_ema[-1],
+                "entry_ema": entry_ema[-1],
             }
 
     except Exception as e:
@@ -450,26 +453,108 @@ def analyze(exchange, symbol):
 # =========================================
 
 def signal_message(exchange_name, symbol, data):
+    price = data["price"]
+
+    tp1 = price * (1 + TP1_PERCENT / 100)
+    tp2 = price * (1 + TP2_PERCENT / 100)
+    tp3 = price * (1 + TP3_PERCENT / 100)
+    sl = price * (1 - SL_PERCENT / 100)
+
+    if data["macd"] > 0:
+        macd_status = "موجب ✅"
+    elif data["macd"] > data["macd_prev"]:
+        macd_status = "انعكاس مبكر ويتحسن 🔄"
+    else:
+        macd_status = "ضعيف ⚠️"
+
+    if data["volume_ratio"] >= 5:
+        volume_strength = "قوي جدًا 🔥"
+    elif data["volume_ratio"] >= 2:
+        volume_strength = "قوي ✅"
+    elif data["volume_ratio"] >= 1:
+        volume_strength = "متوسط ⚠️"
+    else:
+        volume_strength = "بداية حركة / منخفض"
+
     return f"""
-🟢 TREND SIGNAL
+🟢 MULTI-TIMEFRAME SIGNAL
+━━━━━━━━━━━━━━
 
 🏦 المنصة: {exchange_name}
 🪙 العملة: {symbol}
 
-💰 السعر: {data['price']:.8f}
+💰 سعر الدخول:
+{price:.8f}
+
+📈 الاتجاه:
+• Trend Frame: {TREND_TIMEFRAME}
+• Entry Frame: {ENTRY_TIMEFRAME}
 
 📊 Stoch RSI
 K: {data['k']:.2f}
 D: {data['d']:.2f}
 
-📈 MACD
-{data['macd']:.8f}
+📈 MACD Histogram
+الحالي: {data['macd']:.8f}
+السابق: {data['macd_prev']:.8f}
+الحالة: {macd_status}
 
-💧 Volume Ratio
-{data['volume_ratio']:.2f}x
+💧 Volume
+الحالي: ${data['current_volume']:,.0f}
+المتوسط: ${data['avg_volume']:,.0f}
+Volume Ratio: {data['volume_ratio']:.2f}x
+القوة: {volume_strength}
 
-💵 Volume
-${data['current_volume']:,.0f}
+🎯 Targets
+TP1: {tp1:.8f} (+{TP1_PERCENT}%)
+TP2: {tp2:.8f} (+{TP2_PERCENT}%)
+TP3: {tp3:.8f} (+{TP3_PERCENT}%)
+
+🛑 Stop Loss
+{sl:.8f} (-{SL_PERCENT}%)
+
+⏰ Cooldown:
+{COOLDOWN_HOURS} ساعة
+
+⚠️ تحليل آلي وليس توصية مالية
+"""
+
+
+def startup_message():
+    enabled = [name for name, _ in EXCHANGES]
+
+    return f"""
+🤖 بوت الإشارات اشتغل بنجاح ✅
+━━━━━━━━━━━━━━
+
+📈 Trend Timeframe: {TREND_TIMEFRAME}
+📈 Entry Timeframe: {ENTRY_TIMEFRAME}
+⏱️ الفحص كل: {CHECK_INTERVAL} ثانية
+
+🏦 المنصات:
+{", ".join(enabled)}
+
+🌐 CoinMarketCap:
+Top N: {CMC_TOP_N}
+Min 24H Volume: ${MIN_24H_VOLUME_USD:,.0f}
+
+🎯 شروط الدخول:
+• MAX Stoch RSI: أقل من {MAX_STOCH_RSI}
+• Volume Ratio: أعلى من {MIN_VOLUME_RATIO}x
+• Candle Volume: أعلى من ${MIN_CANDLE_VOLUME_USD:,.0f}
+
+⚙️ الشروط المفعلة:
+• Trend Close Above EMA: {REQUIRE_TREND_CLOSE_ABOVE_EMA}
+• Trend MACD Positive: {REQUIRE_TREND_MACD_POSITIVE}
+• Entry Close Above EMA: {REQUIRE_ENTRY_CLOSE_ABOVE_EMA}
+• K Above D: {REQUIRE_ENTRY_STOCH_K_ABOVE_D}
+• Entry MACD Positive: {REQUIRE_ENTRY_MACD_POSITIVE}
+• Entry MACD Rising: {REQUIRE_ENTRY_MACD_RISING}
+
+🧊 Cooldown:
+{COOLDOWN_HOURS} ساعة
+
+✅ البوت بدأ الفحص الآن.
 """
 
 
@@ -481,11 +566,12 @@ def can_send_signal(signal_key):
     if signal_key not in sent_signals:
         return True
 
-    last_sent = sent_signals[signal_key]
+    try:
+        last_sent = float(sent_signals[signal_key])
+    except:
+        return True
 
-    hours_passed = (
-        time.time() - last_sent
-    ) / 3600
+    hours_passed = (time.time() - last_sent) / 3600
 
     return hours_passed >= COOLDOWN_HOURS
 
@@ -495,25 +581,14 @@ def can_send_signal(signal_key):
 # =========================================
 
 def scanner_loop():
-    send_telegram(
-        f"""
-🤖 بوت الإشارات اشتغل بنجاح ✅
-
-📈 الاتجاه: {TREND_TIMEFRAME}
-📈 الدخول: {ENTRY_TIMEFRAME}
-
-⏱️ الفحص كل {CHECK_INTERVAL} ثانية
-
-🧊 Cooldown:
-{COOLDOWN_HOURS} ساعة
-"""
-    )
+    send_telegram(startup_message())
 
     while True:
         try:
-            print("Scanning...")
+            print("Scanning CoinMarketCap...")
 
             symbols = get_cmc_symbols()
+            print(f"Symbols Loaded: {len(symbols)}")
 
             signals_found = 0
 
@@ -535,23 +610,12 @@ def scanner_loop():
                         data = analyze(exchange, symbol)
 
                         if data:
-                            send_telegram(
-                                signal_message(
-                                    exchange_name,
-                                    symbol,
-                                    data
-                                )
-                            )
+                            send_telegram(signal_message(exchange_name, symbol, data))
 
                             sent_signals[signal_key] = time.time()
-
-                            save_json(
-                                SENT_FILE,
-                                sent_signals
-                            )
+                            save_json(SENT_FILE, sent_signals)
 
                             signals_found += 1
-
                             time.sleep(1)
 
                 except Exception as e:
@@ -570,10 +634,7 @@ def scanner_loop():
 # =========================================
 
 if __name__ == "__main__":
-    threading.Thread(
-        target=scanner_loop,
-        daemon=True
-    ).start()
+    threading.Thread(target=scanner_loop, daemon=True).start()
 
     port = int(os.getenv("PORT", 8080))
 
